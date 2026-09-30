@@ -1,2 +1,68 @@
 # face_search
-Find every photo of someone in a folder, using reference photos. Local-only face search.
+
+Search a folder of photos for a specific person. Give it reference photos,
+and it copies every photo in the search folder that appears to contain them
+into an output folder.
+
+Fully offline — runs on your own machine using [InsightFace](https://github.com/deepinsight/insightface)
+(`buffalo_l` model, CPU). No cloud, no accounts, no data leaves your computer.
+Originals are never modified; matches are copied, never moved.
+
+## Requirements
+
+- Python 3.10+
+- `pip install insightface onnxruntime opencv-python numpy`
+
+## Usage
+
+```
+python face_search.py --ref <reference_folder> --photos <photos_folder> --out <output_folder>
+```
+
+Example (Windows):
+
+```
+python face_search.py --ref .\refs\person1 --photos "C:\Users\You\Pictures" --out .\matches_person1
+```
+
+Suggested folder layout:
+
+```
+face_search/
+├── face_search.py
+├── README.md
+├── LICENSE
+├── refs/
+│   ├── person1/        <- reference photos of person 1
+│   └── person2/        <- reference photos of person 2
+├── matches_person1/    <- created automatically
+└── matches_person2/    <- created automatically
+```
+
+- `--ref` — folder with reference photos of the person (3–5 clear, front-facing shots work best)
+- `--photos` — folder of photos to search (subfolders included)
+- `--out` — folder where matching photos are copied (created automatically)
+- `--threshold` — similarity cutoff, 0–1, default `0.45`
+
+To search for another person, use a different reference folder and output folder:
+
+```
+python face_search.py --ref .\refs\person2 --photos "C:\Users\You\Pictures" --out .\matches_person2
+```
+
+## Tuning the threshold
+
+- **Too many wrong matches?** Raise it: `--threshold 0.55`
+- **Missing photos you know are there?** Lower it: `--threshold 0.35`
+
+## Notes
+
+- First run downloads the recognition model (~300 MB) into `~/.insightface`.
+- Reference photos containing multiple faces will enroll every face found;
+  solo shots of the person give the cleanest results.
+- Works best on clear, front-facing faces. Profile shots, sunglasses, heavy
+  shadows, and very small/distant faces may be missed.
+
+## License
+
+MIT
