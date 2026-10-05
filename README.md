@@ -55,6 +55,43 @@ python face_search.py --ref .\refs\person2 --photos "C:\Users\You\Pictures" --ou
 - **Too many wrong matches?** Raise it: `--threshold 0.55`
 - **Missing photos you know are there?** Lower it: `--threshold 0.35`
 
+## Desktop app (Windows)
+
+Prefer a point-and-click interface over the terminal? The same search engine
+is available as a desktop app.
+
+![Face Search GUI](screenshot.png)
+
+1. Download **FaceSearchGUI.exe** from the
+   [Releases page](https://github.com/Zabas-dot/face_search/releases).
+2. Choose your folders:
+   - **Reference folder** — a few clear photos of the person's face
+   - **Photos folder** — the pictures you want to search through
+   - **Output folder** — where matches get copied (pick any empty folder)
+3. Press **Run Search**.
+
+The very first launch downloads the face-recognition model once (~300 MB);
+after that it works fully offline.
+
+### App features
+
+- Progress bar with live photo count and match count
+- Embedding cache: repeat scans of unchanged photos take seconds
+- Similarity threshold slider
+- Multi-person reference folders (subfolders per person, or automatic
+  separation with a pre-scan preview)
+- HEIC/HEIF photo support
+- Desktop notification when the scan finishes
+
+### Building from source (optional)
+
+```bat
+py -3 -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python face_search_gui.py
+```
+
 ## Notes
 
 - First run downloads the recognition model (~300 MB) into `~/.insightface`.
