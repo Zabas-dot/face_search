@@ -60,8 +60,6 @@ python face_search.py --ref .\refs\person2 --photos "C:\Users\You\Pictures" --ou
 Prefer a point-and-click interface over the terminal? The same search engine
 is available as a desktop app.
 
-![Face Search GUI](screenshot.png)
-
 1. Download **FaceSearchGUI.exe** from the
    [Releases page](https://github.com/Zabas-dot/face_search/releases).
 2. Choose your folders:
