@@ -27,24 +27,75 @@ import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 
 
 def list_images(folder):
     out = []
     for root, _dirs, files in os.walk(folder):
         for f in files:
+            # "._name.jpg" files are macOS metadata left on USB drives, not photos.
+            if f.startswith("._"):
+                continue
             if os.path.splitext(f)[1].lower() in IMAGE_EXTS:
                 out.append(os.path.join(root, f))
     return sorted(out)
 
 
-def face_embeddings(app, image_path):
+_heif_registered = False
+
+
+def _read_image(image_path):
+    """Read an image file. Falls back to decoding from bytes (cv2.imread
+    can't open non-ASCII paths on Windows) and then to PIL for HEIC/HEIF."""
+    global _heif_registered
     img = cv2.imread(image_path)
+    if img is not None:
+        return img
+    try:
+        img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is not None:
+            return img
+    except Exception:
+        pass
+    # Try PIL (with pillow-heif registered, handles .heic/.heif)
+    try:
+        from PIL import Image, ImageOps
+        if not _heif_registered:
+            try:
+                from pillow_heif import register_heif_opener
+                register_heif_opener()
+            except ImportError:
+                pass
+            _heif_registered = True
+        with Image.open(image_path) as pil:
+            pil = ImageOps.exif_transpose(pil).convert("RGB")  # honor phone rotation
+            return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
+
+
+def read_faces(app, image_path):
+    """Return [(normed_embedding, face_area, (x1, y1, x2, y2))] for every
+    face in the photo. Raises IOError if the file can't be decoded."""
+    img = _read_image(image_path)
     if img is None:
+        raise IOError("could not read image")
+    out = []
+    for f in app.get(img):
+        x1, y1, x2, y2 = (float(v) for v in f.bbox[:4])
+        out.append((f.normed_embedding.astype(np.float32),
+                    max(0.0, x2 - x1) * max(0.0, y2 - y1),
+                    (x1, y1, x2, y2)))
+    return out
+
+
+def face_embeddings(app, image_path):
+    """Embeddings of every face in the photo ([] if unreadable)."""
+    try:
+        return [face[0] for face in read_faces(app, image_path)]
+    except IOError:
         return []
-    faces = app.get(img)
-    return [f.normed_embedding.astype(np.float32) for f in faces]
 
 
 def main():
