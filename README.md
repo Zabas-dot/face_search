@@ -132,8 +132,6 @@ It prints, for each threshold, how often the right person is found and how often
 
 Both licenses allow commercial use. The models are downloaded from their publishers on first use, not included in this repository or the exe. Only AuraFace's own recognition model is used. The AuraFace download page also hosts InsightFace detector and landmark files, which keep InsightFace's non-commercial license, so this app doesn't use them.
 
-Earlier versions (1.x) used InsightFace's `buffalo_l` models, which are licensed for non-commercial research only. Version 2.0 doesn't use any InsightFace code or models.
-
 As with most face models, the publishers don't fully document their training data. This isn't legal advice; if commercial use matters to you, review the licenses yourself.
 
 ## License

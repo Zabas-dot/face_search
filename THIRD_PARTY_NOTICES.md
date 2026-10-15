@@ -36,6 +36,3 @@ geometry), implemented in `face_model.py`.
 The LGPL libraries (libheif, libde265) are used as separate DLLs. The full
 source of Face Search is published, so anyone can rebuild the exe with
 their own versions of them.
-
-Versions before 2.0 used pillow-heif, whose Windows wheels also bundle the
-GPL-licensed x265 encoder. 2.0 uses the decode-only pi-heif instead.
