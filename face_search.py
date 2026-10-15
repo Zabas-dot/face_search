@@ -4,18 +4,19 @@ face_search.py -- search a folder of photos for a specific person.
 
 You give it reference photos of the person; it copies every photo in the
 search folder that appears to contain them into an output folder.
-Fully offline, runs on your own machine (InsightFace, CPU).
+Runs on your own machine. Uses face_model.py: YuNet face detection (MIT)
+and AuraFace recognition (Apache 2.0), both licensed for commercial use.
 
 Setup (Windows):
     py -3.12 -m venv .venv
     .venv\\Scripts\\activate
-    pip install insightface onnxruntime opencv-python numpy
+    pip install onnxruntime opencv-python numpy onnx requests
 
 Usage:
     python face_search.py --ref .\\refs\\person1 --photos .\\all_photos --out .\\matches_person1
-    python face_search.py --ref .\\refs\\person1 --photos .\\all_photos --out .\\matches_person1 --threshold 0.55
+    python face_search.py --ref .\\refs\\person1 --photos .\\all_photos --out .\\matches_person1 --threshold 0.50
 
-First run downloads the recognition model (~300 MB) into %USERPROFILE%\\.insightface.
+First run downloads the face models (~262 MB) into %USERPROFILE%\\.face_search\\models.
 """
 
 import argparse
@@ -25,14 +26,18 @@ import sys
 
 import cv2
 import numpy as np
-from insightface.app import FaceAnalysis
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 
 
 def list_images(folder):
     out = []
-    for root, _dirs, files in os.walk(folder):
+    for root, dirs, files in os.walk(folder):
+        # Skip hidden/system folders inside the chosen folder: digiKam's
+        # ".dtrash" trash, thumbnail caches, the Windows recycle bin, NAS
+        # metadata. (A chosen folder itself is always searched.)
+        dirs[:] = [d for d in dirs if not d.startswith(".")
+                   and d not in ("$RECYCLE.BIN", "@eaDir", "System Volume Information")]
         for f in files:
             # "._name.jpg" files are macOS metadata left on USB drives, not photos.
             if f.startswith("._"):
@@ -58,12 +63,12 @@ def _read_image(image_path):
             return img
     except Exception:
         pass
-    # Try PIL (with pillow-heif registered, handles .heic/.heif)
+    # Try PIL (with pi-heif registered, handles .heic/.heif)
     try:
         from PIL import Image, ImageOps
         if not _heif_registered:
             try:
-                from pillow_heif import register_heif_opener
+                from pi_heif import register_heif_opener  # HEIC decoding (LGPL)
                 register_heif_opener()
             except ImportError:
                 pass
@@ -103,13 +108,16 @@ def main():
     p.add_argument("--ref", required=True, help="Folder with reference photos of the person")
     p.add_argument("--photos", required=True, help="Folder of photos to search")
     p.add_argument("--out", required=True, help="Folder where matches are copied")
-    p.add_argument("--threshold", type=float, default=0.45,
-                   help="Similarity 0..1 (default 0.45). Raise to reduce false matches, lower to catch more.")
+    p.add_argument("--threshold", type=float, default=0.40,
+                   help="Similarity 0..1 (default 0.40). Raise to reduce false matches, lower to catch more.")
     args = p.parse_args()
 
-    print("Loading face model (first run downloads ~300 MB)...")
-    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-    app.prepare(ctx_id=0, det_size=(640, 640))
+    import face_model
+    if not face_model.models_ready():
+        print("First run: downloading the face models (~%d MB, once only)..."
+              % face_model.DOWNLOAD_MB)
+    face_model.ensure_models(log=print)
+    app = face_model.FaceModel(det_size=640)
 
     ref_files = list_images(args.ref)
     if not ref_files:
@@ -150,7 +158,7 @@ def main():
             print(f"  ...{i}/{len(photo_files)} scanned, {matches} matches so far")
 
     print(f"Done. {matches} matching photo(s) copied to {args.out}")
-    print("Tip: too many wrong matches? Re-run with --threshold 0.55. Missing some? Try --threshold 0.35.")
+    print("Tip: too many wrong matches? Re-run with --threshold 0.50. Missing some? Try --threshold 0.30.")
 
 
 if __name__ == "__main__":

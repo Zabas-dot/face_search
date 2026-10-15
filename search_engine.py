@@ -1,7 +1,8 @@
 """search_engine.py -- reusable backend for the face_search GUI.
 
-It uses the exact same search algorithm as face_search.py: InsightFace
-buffalo_l embeddings, cosine similarity against the reference embeddings,
+It uses the exact same search algorithm as face_search.py: face embeddings
+from face_model.py (YuNet detection + AuraFace recognition, both licensed
+for commercial use), cosine similarity against the reference embeddings,
 match when similarity >= threshold.
 
 Additions the CLI doesn't have:
@@ -10,8 +11,8 @@ Additions the CLI doesn't have:
    ~/.face_search_cache/ keyed by file path + modification time + size.
    Photos that haven't changed since the last scan are NOT re-analyzed, so
    a repeat search over the same folder takes seconds instead of tens of
-   minutes. Each scan detail (quick, standard, thorough) keeps its own cache, because
-   their embeddings differ. The file's content hash is cached too, so
+   minutes. Each scan detail (quick, standard, thorough) and each face model
+   keeps its own cache, because their embeddings differ. The file's content hash is cached too, so
    repeat runs don't re-read every matching photo from disk. Entries for
    photos that were deleted are pruned after each complete run.
 
@@ -43,7 +44,8 @@ import time
 import traceback
 
 import numpy as np
-from insightface.app import FaceAnalysis
+
+import face_model
 
 # Same detection code as the CLI.
 from face_search import list_images, read_faces
@@ -60,13 +62,22 @@ DET_FAST = 320
 # Scan detail -> detector input size. Bigger finds smaller faces but is slower.
 DET_SIZES = {"quick": DET_FAST, "standard": DET_NORMAL, "thorough": 1280}
 _CACHE_SUFFIX = {"quick": "_fast", "standard": "", "thorough": "_thorough"}
+
+# Similarity thresholds for AuraFace (cosine similarity of face embeddings).
+# Provisional until calibrated on real photos (tools/calibrate.py).
+THRESHOLD_DEFAULT = 0.40
+THRESHOLD_MIN, THRESHOLD_MAX = 0.20, 0.80
+THRESHOLD_LOOSE_BELOW = 0.35   # slider wording: Loose below, Strict above
+THRESHOLD_STRICT_ABOVE = 0.45
+CLUSTER_SIM = 0.35            # auto-separating people in reference photos
+CLUSTER_MERGE_SIM = 0.30
 # Graphics-card back ends, best first (DirectML works with most Windows GPUs).
 GPU_PROVIDERS = ("CUDAExecutionProvider", "DmlExecutionProvider")
 NO_FACES_MSG = "No faces detected in the reference photos. Use clearer, front-facing shots."
 
 CACHE_CHECKPOINT_SECS = 60   # full scan cache (can be large)
 STATE_CHECKPOINT_SECS = 10   # manifest + output index (small)
-REF_PICK_MIN_SIM = 0.30      # group reference photo: min similarity to keep a face
+REF_PICK_MIN_SIM = 0.25      # group reference photo: min similarity to keep a face
 
 
 # --------------------------------------------------------------------------
@@ -79,8 +90,9 @@ def _detail(fast=False, detail=None):
 
 def _cache_path(photos_folder, fast=False, detail=None):
     digest = hashlib.sha1(os.path.abspath(photos_folder).encode("utf-8")).hexdigest()[:16]
-    # Standard detail keeps the original file name so existing caches still work.
-    return os.path.join(CACHE_DIR, digest + _CACHE_SUFFIX[_detail(fast, detail)] + ".pkl")
+    # The model tag keeps embeddings from different face models apart.
+    return os.path.join(CACHE_DIR, "%s_%s%s.pkl" % (
+        digest, face_model.MODEL_TAG, _CACHE_SUFFIX[_detail(fast, detail)]))
 
 
 def load_cache(photos_folder, fast=False, detail=None):
@@ -125,143 +137,61 @@ def gpu_available():
     return any(p in _available_providers() for p in GPU_PROVIDERS)
 
 
-def _make_app(det, providers):
-    # Only face detection + recognition are used. InsightFace otherwise also
-    # runs 3 more models (landmarks, age/gender) on every face found; the
-    # embeddings are identical either way because recognition aligns faces
-    # with the detector's 5 key points.
-    try:
-        app = FaceAnalysis(name=MODEL_NAME, providers=providers,
-                           allowed_modules=["detection", "recognition"])
-    except TypeError:  # very old InsightFace without allowed_modules
-        app = FaceAnalysis(name=MODEL_NAME, providers=providers)
-    app.prepare(ctx_id=0, det_size=(det, det))
-    return app
-
-
-def _warm_up(app, det):
-    """Run both models once, so a graphics card that can't run them fails
-    here (and we fall back to the processor) instead of mid-search."""
-    app.get(np.zeros((det, det, 3), dtype=np.uint8))
-    rec = getattr(app, "models", {}).get("recognition")
-    if rec is not None and hasattr(rec, "get_feat"):
-        rec.get_feat(np.zeros((112, 112, 3), dtype=np.uint8))
-
-
-def _session_on_gpu(app):
-    try:
-        first = app.det_model.session.get_providers()[0]
-        return first in GPU_PROVIDERS
-    except Exception:
-        return False
-
-
 def load_model(fast=False, detail=None, use_gpu=False):
-    """Prepare the InsightFace model.
+    """Prepare the face model (YuNet detection + AuraFace recognition),
+    downloading the model files on first use.
 
     detail: "quick" (320 px detector, ~3-4x faster first scan, misses small
     faces), "standard" (640 px) or "thorough" (1280 px, finds small faces in
-    group shots and large photos, ~3x slower). fast=True means "quick".
-    use_gpu: try the graphics card first; falls back to the processor if it
-    isn't available or fails. The returned app has .fs_device set to
-    "graphics card" or "processor" and .fs_detail to the detail used.
+    group shots and large photos, slower). fast=True means "quick".
+    use_gpu: try the graphics card first for recognition; falls back to the
+    processor if it isn't available or fails. The returned model has
+    .fs_device ("graphics card" or "processor") and .fs_detail set.
     """
     detail = _detail(fast, detail)
     det = DET_SIZES[detail]
-    repair_model_folder()
-    _install_download_hook()
-    app = None
+    face_model.ensure_models()
+    model = None
     if use_gpu:
         gpu = [p for p in GPU_PROVIDERS if p in _available_providers()]
         if gpu:
             try:
-                candidate = _make_app(det, [gpu[0], "CPUExecutionProvider"])
-                _warm_up(candidate, det)
-                if _session_on_gpu(candidate):
-                    app = candidate
-                    app.fs_device = "graphics card"
+                candidate = face_model.FaceModel(det, [gpu[0], "CPUExecutionProvider"])
+                candidate.warm_up()
+                if candidate.providers and candidate.providers[0] in GPU_PROVIDERS:
+                    model = candidate
+                    model.fs_device = "graphics card"
             except Exception:
-                app = None
-    if app is None:
-        try:
-            app = _make_app(det, ["CPUExecutionProvider"])
-        except Exception:
-            repair_model_folder()  # don't leave a broken half-download behind
-            raise
-        app.fs_device = "processor"
-    app.fs_detail = detail
-    return app
+                model = None
+    if model is None:
+        model = face_model.FaceModel(det, ["CPUExecutionProvider"])
+        model.fs_device = "processor"
+    model.fs_detail = detail
+    return model
 
 
 # ---- First-run model download --------------------------------------------
 
-MODEL_NAME = "buffalo_l"
-MODEL_ROOT = os.path.join(os.path.expanduser("~"), ".insightface", "models")
-_MODEL_FILES = ("det_10g.onnx", "w600k_r50.onnx")  # detection + recognition
-MODEL_DOWNLOAD_MB = 280  # approximate, shown before the size is known
-
-# Filled in while the model downloads: {"done": bytes, "total": bytes or 0}
-download_progress = {"done": 0, "total": 0}
-
-
-def _model_dir():
-    return os.path.join(MODEL_ROOT, MODEL_NAME)
+MODEL_DOWNLOAD_MB = face_model.DOWNLOAD_MB
+download_progress = face_model.download_progress  # same dict, live progress
 
 
 def model_ready():
-    """True if the face model is already downloaded (the folder holds model
-    files -- either the classic layout or InsightFace's package layout)."""
-    d = _model_dir()
-    if not os.path.isdir(d):
-        return False
-    if all(os.path.isfile(os.path.join(d, f)) for f in _MODEL_FILES):
-        return True
-    try:  # InsightFace 2.x package layout
-        from insightface.model_zoo.package_manifest import has_model_package_manifest
-        return bool(has_model_package_manifest(d))
-    except Exception:
-        # Can't tell: treat any model file as "present" so a working
-        # model is never deleted.
-        for _root, _dirs, files in os.walk(d):
-            if any(f.lower().endswith(".onnx") for f in files):
-                return True
-        return False
-
-
-def repair_model_folder():
-    """A download interrupted while unpacking can leave an empty model
-    folder, and InsightFace then fails on every launch because it only
-    checks that the folder exists. Remove it (only if it holds no model
-    files at all) so the download runs again."""
-    d = _model_dir()
-    if os.path.isdir(d) and not model_ready():
-        shutil.rmtree(d, ignore_errors=True)
-
-
-def _install_download_hook():
-    """Route InsightFace's console progress bar into download_progress."""
-    try:
-        import insightface.utils.download as dl
-    except Exception:
-        return
-
-    def _progress(iterable, total=None, **_kw):
-        download_progress["done"] = 0
-        download_progress["total"] = int(total or 0) * 1024
-        for chunk in iterable:
-            download_progress["done"] += len(chunk)
-            yield chunk
-
-    dl.tqdm = _progress
+    """True if the face model files are already downloaded."""
+    return face_model.models_ready()
 
 
 def friendly_model_error(exc):
     """Turn a model load/download failure into advice for the user."""
     text = "%s: %s" % (type(exc).__name__, exc)
     lowered = text.lower()
+    if "checksum" in lowered:
+        return ("The face model download was damaged. Press Run search to "
+                "download it again.\n(Details: %s)" % exc)
     if not model_ready() and any(w in lowered for w in (
             "connection", "resolve", "timeout", "timed out", "network",
-            "failed downloading", "ssl", "proxy", "unreachable", "getaddrinfo")):
+            "failed downloading", "ssl", "proxy", "unreachable", "getaddrinfo",
+            "max retries", "urlopen", "http")):
         return ("Couldn't download the face model. Check that you're connected "
                 "to the internet and press Run search again.\n(The ~%d MB "
                 "download is needed only once.)" % MODEL_DOWNLOAD_MB)
@@ -274,14 +204,14 @@ def friendly_model_error(exc):
 def _write_diag_and_raise(app, errors, tb_text):
     """All reference photos failed to load: write a diagnostic log and raise."""
     try:
-        import insightface, onnxruntime, cv2
-        diag = ("insightface %s, onnxruntime %s, opencv %s\n"
-                % (getattr(insightface, "__version__", "?"),
+        import onnxruntime, cv2
+        diag = ("face model %s, onnxruntime %s, opencv %s\n"
+                % (face_model.MODEL_TAG,
                    getattr(onnxruntime, "__version__", "?"),
                    getattr(cv2, "__version__", "?")))
     except Exception:
         diag = "version check failed\n"
-    diag += "det_model: %s\n" % type(getattr(app, "det_model", None)).__name__
+    diag += "device: %s\n" % getattr(app, "fs_device", "?")
     diag += "\n".join(errors) + "\n\n" + tb_text
     log_path = os.path.join(os.path.expanduser("~"), "face_search_diag.log")
     try:
@@ -354,13 +284,15 @@ def _pick_target_faces(per_file):
     return embs, emb_files, ignored
 
 
-def _cluster_embeddings(embs, threshold=0.35):
+def _cluster_embeddings(embs, threshold=None):
     """Greedy clustering of normalized face embeddings by cosine similarity.
 
     Returns a list of clusters (biggest first); each cluster is a list of
     indices into embs. Uses a lenient threshold since reference folders are
     user-curated -- better to merge than to split one person.
     """
+    if threshold is None:
+        threshold = CLUSTER_SIM
     clusters = []  # list of [centroid, [indices]]
     for i, e in enumerate(embs):
         best_idx, best_sim = -1, -1.0
@@ -390,7 +322,7 @@ def _cluster_embeddings(embs, threshold=0.35):
                 sim = float(np.dot(clusters[a][0], clusters[b][0]))
                 if sim > best_sim:
                     best_sim, best_pair = sim, (a, b)
-        if best_pair and best_sim >= 0.30:
+        if best_pair and best_sim >= CLUSTER_MERGE_SIM:
             a, b = best_pair
             ca, ma = clusters[a]
             cb, mb = clusters[b]
@@ -708,20 +640,37 @@ def remove_reference(path):
         pass
 
 
-def _write_unreadable(out_dir, paths):
-    """List photos that couldn't be read in out_dir/unreadable_photos.txt
-    (removed again when a later run has none)."""
+def _write_unreadable(out_dir, paths, failed=(), failed_tb=()):
+    """List photos that couldn't be searched in out_dir/unreadable_photos.txt
+    (removed again when a later run has none). Files that couldn't be opened
+    and photos the face model failed on are listed separately; the first
+    model error's details also go to ~/face_search_diag.log."""
     target = os.path.join(out_dir, UNREADABLE_NAME)
     try:
-        if paths:
+        if paths or failed:
             with open(target, "w", encoding="utf-8") as f:
-                f.write("These photos could not be opened and were not searched.\n"
-                        "They may be damaged, incomplete, or in an unsupported format.\n\n")
-                f.write("\n".join(os.path.normpath(p) for p in paths) + "\n")
+                if paths:
+                    f.write("These photos could not be opened and were not searched.\n"
+                            "They may be damaged, incomplete, not downloaded from the "
+                            "cloud, or in an unsupported format.\n\n")
+                    f.write("\n".join(os.path.normpath(p) for p in paths) + "\n\n")
+                if failed:
+                    f.write("These photos opened fine, but the face model failed on "
+                            "them, so they were not searched:\n\n")
+                    for p, msg in failed:
+                        f.write("%s\n    %s\n" % (os.path.normpath(p), msg[:300]))
         elif os.path.isfile(target):
             os.remove(target)
     except OSError:
         pass
+    if failed_tb:
+        try:
+            with open(os.path.join(os.path.expanduser("~"), "face_search_diag.log"),
+                      "w", encoding="utf-8") as f:
+                f.write("First face-model error (%d photo(s) affected):\n%s\n%s"
+                        % (len(failed), failed[0][0], failed_tb[0]))
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -729,7 +678,7 @@ def _write_unreadable(out_dir, paths):
 # --------------------------------------------------------------------------
 
 def run_search(app, ref_matrices, photo_files, out_dir, photos_folder,
-               threshold=0.45, use_cache=True,
+               threshold=THRESHOLD_DEFAULT, use_cache=True,
                progress_cb=None, cancel_event=None, fast=False, detail=None):
     """Scan photo_files, copy matches into out_dir.
 
@@ -767,6 +716,7 @@ def run_search(app, ref_matrices, photo_files, out_dir, photos_folder,
     cache_dirty = False
     counts = {"cache_hits": 0, "skipped": 0, "duplicates": 0, "blocklisted": 0}
     unreadable = []
+    failed, failed_tb = [], []   # photos the face model couldn't process
     matches = {name: [] for name in ref_matrices}
     match_scores = {}
     total_matches = 0
@@ -787,7 +737,7 @@ def run_search(app, ref_matrices, photo_files, out_dir, photos_folder,
             matches[name].sort(key=lambda m: -m[1])  # best matches first
         res = {"cancelled": cancelled, "matches": matches, "cleaned": cleaned,
                "stale_removed": stale_removed, "match_scores": match_scores,
-               "unreadable": unreadable}
+               "unreadable": unreadable, "failed": failed}
         res.update(counts)
         return res
 
@@ -807,23 +757,29 @@ def run_search(app, ref_matrices, photo_files, out_dir, photos_folder,
             sig = None
 
         entry = cache.get(key) if use_cache else None
-        if entry is not None and sig is not None and \
+        # Photos that couldn't be opened are always tried again: the cause
+        # (a missing decoder, a cloud file not downloaded yet) may be fixed.
+        if entry is not None and sig is not None and not entry.get("bad") and \
                 entry.get("mtime") == sig[0] and entry.get("size") == sig[1]:
             embs = entry["embs"]
             counts["cache_hits"] += 1
             from_cache = True
-            if entry.get("bad"):
-                counts["skipped"] += 1
-                unreadable.append(fp)
         else:
             bad = False
             try:
                 embs = [np.asarray(f[0], dtype=np.float32) for f in read_faces(app, fp)]
-            except Exception:
-                embs = []  # corrupt/unreadable photo -- skip it
+            except OSError:
+                embs = []  # the file itself couldn't be opened/decoded
                 bad = True
                 counts["skipped"] += 1
                 unreadable.append(fp)
+            except Exception as exc:
+                embs = []  # opened fine, but face detection/recognition failed
+                bad = True
+                counts["skipped"] += 1
+                failed.append((fp, "%s: %s" % (type(exc).__name__, exc)))
+                if not failed_tb:
+                    failed_tb.append(traceback.format_exc())
             from_cache = False
             entry = None
             if use_cache and sig is not None:
@@ -930,7 +886,7 @@ def run_search(app, ref_matrices, photo_files, out_dir, photos_folder,
             pass
     _save_manifest(out_dir, new_manifest)
     index.save(prune=True)
-    _write_unreadable(out_dir, unreadable)
+    _write_unreadable(out_dir, unreadable, failed, failed_tb)
     return _result(False, stale_removed)
 
 
@@ -939,4 +895,5 @@ __all__ = ["load_model", "enroll_references", "run_search",
            "blocklist_add", "forget_match", "_file_hash", "UNREADABLE_NAME",
            "model_ready", "download_progress", "friendly_model_error",
            "MODEL_DOWNLOAD_MB", "gpu_available", "add_reference",
-           "remove_reference", "DET_SIZES"]
+           "remove_reference", "DET_SIZES", "THRESHOLD_DEFAULT", "THRESHOLD_MIN",
+           "THRESHOLD_MAX", "THRESHOLD_LOOSE_BELOW", "THRESHOLD_STRICT_ABOVE"]

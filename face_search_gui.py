@@ -23,117 +23,23 @@ import json
 import time
 
 # Windowed (PyInstaller --noconsole) exes have sys.stdout/sys.stderr = None;
-# any print() by us or a library (e.g. InsightFace's model download) would
+# any print() by us or a library would
 # crash with "'NoneType' object has no attribute 'write'". Send it nowhere.
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w")
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
-# InsightFace ships a data file (meanshape_68.pkl) that PyInstaller does not
-# bundle: in a frozen exe, get_object() looks in sys._MEIPASS/objects/,
-# finds nothing, returns None, and the landmark model later crashes with
-# "'NoneType' object has no attribute 'shape'". Embed the file (68x3 floats,
-# ~5KB) and fall back to it when the real file is missing. The CLI (not
-# frozen) keeps using the file from the installed package.
-_MEANSHAPE_68_DATA = np.array([
-    [-0.6266950368881226, -0.2926996946334839, -0.3140018582344055],
-    [-0.5996649265289307, -0.12250272184610367, -0.2924409508705139],
-    [-0.571026086807251, 0.05118739977478981, -0.2549465000629425],
-    [-0.5338566899299622, 0.21284838020801544, -0.1866333782672882],
-    [-0.4797332286834717, 0.3506459593772888, -0.047699932008981705],
-    [-0.3957556486129761, 0.4465116560459137, 0.07328663021326065],
-    [-0.29880842566490173, 0.5106605887413025, 0.17977793514728546],
-    [-0.18838681280612946, 0.554440438747406, 0.3166600465774536],
-    [0.0014708322705700994, 0.584439218044281, 0.38841578364372253],
-    [0.19099053740501404, 0.5517070889472961, 0.31433114409446716],
-    [0.3269285559654236, 0.48957568407058716, 0.16839952766895294],
-    [0.4400261342525482, 0.4023579955101013, 0.03596242889761925],
-    [0.5068787336349487, 0.3116249442100525, -0.09476063400506973],
-    [0.540894627571106, 0.20452618598937988, -0.20267142355442047],
-    [0.574118435382843, 0.04570329561829567, -0.2841764986515045],
-    [0.5991416573524475, -0.14585931599140167, -0.296495646238327],
-    [0.6275436282157898, -0.30774804949760437, -0.30199483036994934],
-    [-0.47466811537742615, -0.4376046359539032, 0.23648710548877716],
-    [-0.4166599214076996, -0.4717560112476349, 0.3159925639629364],
-    [-0.3475387990474701, -0.4840780198574066, 0.366113543510437],
-    [-0.26063987612724304, -0.4763909876346588, 0.3992317318916321],
-    [-0.16712301969528198, -0.45777544379234314, 0.4166091978549957],
-    [0.1231740415096283, -0.45874011516571045, 0.4250619411468506],
-    [0.2063615769147873, -0.4804193377494812, 0.41578391194343567],
-    [0.28667303919792175, -0.4901494085788727, 0.3919537663459778],
-    [0.3623969256877899, -0.4768601655960083, 0.3527863025665283],
-    [0.425568163394928, -0.4500580430030823, 0.2953187823295593],
-    [-0.007627937477082014, -0.3230886459350586, 0.46194377541542053],
-    [-0.007876846939325333, -0.255738765001297, 0.5104694366455078],
-    [-0.007687545381486416, -0.19917990267276764, 0.5525456666946411],
-    [-0.007345120422542095, -0.14261691272258759, 0.5986667275428772],
-    [-0.144961878657341, 0.033126939088106155, 0.4196909964084625],
-    [-0.08434253931045532, 0.03127360716462135, 0.4731740951538086],
-    [-0.005499685648828745, 0.03975145146250725, 0.5146695971488953],
-    [0.06346292793750763, 0.04613516479730606, 0.4792240560054779],
-    [0.13398391008377075, 0.02204025723040104, 0.41907867789268494],
-    [-0.38675081729888916, -0.3133975565433502, 0.259631872177124],
-    [-0.3166607916355133, -0.35007160902023315, 0.3285270035266876],
-    [-0.2341379076242447, -0.35491427779197693, 0.3334933817386627],
-    [-0.15516234934329987, -0.31524932384490967, 0.3143281042575836],
-    [-0.23092176020145416, -0.28427040576934814, 0.3255828619003296],
-    [-0.3175090253353119, -0.28516536951065063, 0.3098825216293335],
-    [0.13895708322525024, -0.30982404947280884, 0.3182835876941681],
-    [0.21945592761039734, -0.35319215059280396, 0.33802759647369385],
-    [0.30174651741981506, -0.349665105342865, 0.333102285861969],
-    [0.37665316462516785, -0.31351813673973083, 0.26322856545448303],
-    [0.2966947853565216, -0.2871439754962921, 0.3220130503177643],
-    [0.21462441980838776, -0.2905276417732239, 0.33124178647994995],
-    [-0.20143844187259674, 0.23736143112182617, 0.37953662872314453],
-    [-0.13732077181339264, 0.18578563630580902, 0.46525245904922485],
-    [-0.07648587226867676, 0.15119342505931854, 0.5035716891288757],
-    [-0.002535885199904442, 0.16872699558734894, 0.5164376497268677],
-    [0.06442102789878845, 0.15088020265102386, 0.5045241117477417],
-    [0.126465305685997, 0.17947596311569214, 0.4685916602611542],
-    [0.21824784576892853, 0.23899227380752563, 0.37567368149757385],
-    [0.13288259506225586, 0.28392839431762695, 0.4400508999824524],
-    [0.06802233308553696, 0.2973543107509613, 0.4774041771888733],
-    [-0.0004690653004217893, 0.30004069209098816, 0.4871094226837158],
-    [-0.06934267282485962, 0.29696860909461975, 0.4805404841899872],
-    [-0.14252015948295593, 0.2743033170700073, 0.43808019161224365],
-    [-0.1781347393989563, 0.23059049248695374, 0.3963589668273926],
-    [-0.07403063774108887, 0.2147187888622284, 0.4653262794017792],
-    [-0.002636224264279008, 0.21414154767990112, 0.4832296073436737],
-    [0.05981616675853729, 0.21076396107673645, 0.47224411368370056],
-    [0.16690002381801605, 0.23127099871635437, 0.396789014339447],
-    [0.059809282422065735, 0.22376428544521332, 0.46641337871551514],
-    [-0.0014343614457175136, 0.2257590889930725, 0.4752439558506012],
-    [-0.07522077113389969, 0.23065608739852905, 0.4671475291252136],
-], dtype=np.float32)
-
-def _patch_insightface_data():
-    try:
-        import insightface.model_zoo.landmark as _lm
-    except Exception:
-        return
-    _orig = _lm.get_object
-
-    def _get_object(name):
-        obj = _orig(name)
-        if obj is not None:
-            return obj
-        base = name[:-4] if name.endswith(".pkl") else name
-        if base == "meanshape_68":
-            return _MEANSHAPE_68_DATA.copy()
-        return None
-
-    _lm.get_object = _get_object
-
-
 from face_search import list_images
 from search_engine import (enroll_references, load_model, run_search,
                            blocklist_add, forget_match, _file_hash,
                            UNREADABLE_NAME, model_ready, download_progress,
                            friendly_model_error, MODEL_DOWNLOAD_MB,
-                           add_reference, remove_reference, DET_SIZES)
+                           add_reference, remove_reference, DET_SIZES,
+                           THRESHOLD_DEFAULT, THRESHOLD_MIN, THRESHOLD_MAX,
+                           THRESHOLD_LOOSE_BELOW, THRESHOLD_STRICT_ABOVE)
 
-__version__ = "1.80"
+__version__ = "2.0"
 
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".face_search_gui.json")
@@ -254,7 +160,7 @@ def _open_pil(path, draft_px=None):
     """Open any supported photo with PIL, upright (phone rotation applied)."""
     from PIL import Image, ImageOps
     try:
-        from pillow_heif import register_heif_opener
+        from pi_heif import register_heif_opener  # HEIC decoding (LGPL)
         register_heif_opener()
     except ImportError:
         pass
@@ -318,12 +224,16 @@ def _describe_reference(path):
 # Wording helpers
 # --------------------------------------------------------------------------
 
+def _thr_text(value):
+    return ("%.3f" % value).rstrip("0").rstrip(".")
+
+
 def strictness_text(value):
-    if value < 0.40:
-        return "Loose (%.2f): finds more photos, but expect some wrong matches" % value
-    if value <= 0.50:
-        return "Balanced (%.2f): recommended for most searches" % value
-    return "Strict (%.2f): fewer wrong matches, but may miss some photos" % value
+    if value < THRESHOLD_LOOSE_BELOW:
+        return "Loose (%s): finds more photos, but expect some wrong matches" % _thr_text(value)
+    if value <= THRESHOLD_STRICT_ABOVE:
+        return "Balanced (%s): recommended for most searches" % _thr_text(value)
+    return "Strict (%s): fewer wrong matches, but may miss some photos" % _thr_text(value)
 
 
 def match_label(score, threshold):
@@ -359,7 +269,6 @@ def _clean_path(text):
 # --------------------------------------------------------------------------
 
 def main(page: ft.Page):
-    _patch_insightface_data()
     page.title = "Face Search"
     try:
         page.window.width = 980   # Flet 1.x
@@ -475,12 +384,15 @@ def main(page: ft.Page):
     photos_hint = ft.Text(PHOTOS_HINT, size=12, color=SUBTLE)
     out_hint = ft.Text(OUT_HINT, size=12, color=SUBTLE)
 
+    # The face model changed in 2.0, so older saved thresholds don't apply.
     try:
-        _thr = min(0.70, max(0.25, float(_cfg.get("threshold", 0.45))))
+        _thr = min(THRESHOLD_MAX, max(THRESHOLD_MIN,
+                                      float(_cfg.get("threshold_af1", THRESHOLD_DEFAULT))))
     except Exception:
-        _thr = 0.45
-    threshold = ft.Slider(min=0.25, max=0.70, divisions=9, value=_thr,
-                          label="{value}")
+        _thr = THRESHOLD_DEFAULT
+    threshold = ft.Slider(min=THRESHOLD_MIN, max=THRESHOLD_MAX,
+                          divisions=int(round((THRESHOLD_MAX - THRESHOLD_MIN) / 0.025)),
+                          value=_thr, label="{value}")
     strict_desc = ft.Text(strictness_text(_thr), size=13)
 
     _detail0 = _cfg.get("detail") or ("quick" if _cfg.get("fast") else "standard")
@@ -511,7 +423,7 @@ def main(page: ft.Page):
     def persist(_e=None):
         save_config({"ref": ref_field.value, "photos": photos_field.value,
                      "out": out_field.value,
-                     "threshold": round(threshold.value, 2),
+                     "threshold_af1": round(threshold.value, 3),
                      "multi": multi_check.value, "detail": detail_group.value,
                      "gpu": gpu_check.value, "cache": cache_check.value,
                      "check_faces": check_faces.value})
@@ -872,7 +784,11 @@ def main(page: ft.Page):
         if result.get("unreadable"):
             details.append("%d couldn't be opened (listed in %s)"
                            % (len(result["unreadable"]), UNREADABLE_NAME))
-        copy_failed = result.get("skipped", 0) - len(result.get("unreadable", []))
+        if result.get("failed"):
+            details.append("%d opened fine but the face model failed on them (details in %s)"
+                           % (len(result["failed"]), UNREADABLE_NAME))
+        copy_failed = (result.get("skipped", 0) - len(result.get("unreadable", []))
+                       - len(result.get("failed", [])))
         if copy_failed > 0:
             details.append("%d couldn't be copied (is the disk full?)" % copy_failed)
         if result.get("duplicates"):
@@ -1031,7 +947,7 @@ def main(page: ft.Page):
                 if total:
                     progress.value = min(1.0, done / total)
                     if done >= total:
-                        status.value = "First-time setup: unpacking the face model..."
+                        status.value = "First-time setup: checking the download..."
                     else:
                         status.value = ("First-time setup: downloading the face model, "
                                         "%d of %d MB. This happens only once."
@@ -1084,7 +1000,7 @@ def main(page: ft.Page):
         ref_dir, photos_dir, out_dir = folders
         persist()
         # Settings are read once here, so changing them mid-run has no effect.
-        opts = {"threshold": round(threshold.value, 2),
+        opts = {"threshold": round(threshold.value, 3),
                 "cache": bool(cache_check.value),
                 "detail": detail_group.value or "standard",
                 "gpu": bool(gpu_check.value)}

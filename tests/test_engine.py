@@ -12,7 +12,7 @@ os.environ["HOME"] = os.environ["USERPROFILE"] = tmp
 import threading, json, shutil, types, numpy as np
 import search_engine as se, fake
 se.CACHE_DIR = os.path.join(tmp, "cache"); se.read_faces = fake.fake_read; vec = fake.vec
-se.MODEL_ROOT = os.path.join(tmp, ".insightface", "models")
+se.face_model.MODEL_DIR = os.path.join(tmp, ".face_search", "models")
 def w(p, t): os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "w").write(t)
 def names(r, p=""): return sorted(os.path.basename(x) for x, _ in r["matches"][p])
 def jpgs(d): return sorted(f for f in os.listdir(d) if f.endswith(".jpg"))
@@ -32,8 +32,10 @@ assert names(r) == ["dup_of_p1.jpg", "p3.jpg", "p4.jpg"] and r["duplicates"] == 
 assert [os.path.basename(p) for p in r["unreadable"]] == ["bad.jpg"]
 txt = open(out+"/unreadable_photos.txt").read(); assert "bad.jpg" in txt
 # rerun from cache still reports the unreadable photo
-r = run(); assert r["cache_hits"] == len(files) and len(r["unreadable"]) == 1 and r["skipped"] == 1
-print("1 ok: unreadable reported, also from cache")
+fake.CALLS.clear()
+r = run(); assert r["cache_hits"] == len(files) - 1 and len(r["unreadable"]) == 1 and r["skipped"] == 1
+assert [os.path.basename(c) for c in fake.CALLS] == ["bad.jpg"], "unreadable photos are retried, others cached"
+print("1 ok: unreadable reported, and retried on the next search")
 
 # 2. output index: second run must not re-hash output files
 calls = []; orig = se._file_hash
@@ -109,9 +111,9 @@ print("8 ok: per-person rejection")
 fake.CALLS.clear(); se.run_search(None, people2, files, out2, photos, detail="thorough")
 assert len(fake.CALLS) == len(files), "thorough must not reuse standard cache"
 fake.CALLS.clear(); se.run_search(None, people2, files, out2, photos, detail="thorough")
-assert fake.CALLS == []
+assert [os.path.basename(c) for c in fake.CALLS] == ["bad.jpg"]
 fake.CALLS.clear(); se.run_search(None, people2, files, out2, photos)
-assert fake.CALLS == [], "standard cache must be untouched"
+assert [os.path.basename(c) for c in fake.CALLS] == ["bad.jpg"], "standard cache must be untouched"
 print("9 ok: scan detail caches separate")
 
 # 10. add / remove reference photos
@@ -125,42 +127,134 @@ d = se.add_reference(refS, "Mom", tmp+"/m/match.jpg", subfolders=True)
 assert os.path.dirname(d) == os.path.join(refS, "Mom")
 print("10 ok: add/remove reference")
 
-# 11. model loading: graphics card with fallback, only 2 models
-class FakeSession:
-    def __init__(self, providers): self.providers = providers
-    def get_providers(self): return list(self.providers)
-class FakeFA:
+# 11. model loading: graphics card with fallback
+import face_model as fm
+class FakeModel:
     broken_gpu = False
     made = []
-    def __init__(self, name, providers, allowed_modules=None):
-        FakeFA.made.append((tuple(providers), allowed_modules))
-        self.det_model = types.SimpleNamespace(session=FakeSession(providers))
-        self.models = {}
-    def prepare(self, ctx_id, det_size): self.det = det_size
-    def get(self, img):
-        if FakeFA.broken_gpu and self.det_model.session.providers[0] != "CPUExecutionProvider":
+    def __init__(self, det_size, providers):
+        FakeModel.made.append((det_size, tuple(providers)))
+        self.det_size = det_size; self._providers = list(providers)
+    @property
+    def providers(self): return self._providers
+    def warm_up(self):
+        if FakeModel.broken_gpu and self._providers[0] != "CPUExecutionProvider":
             raise RuntimeError("DirectML device removed")
-        return []
-se.FaceAnalysis = FakeFA
+real_model, real_ensure = fm.FaceModel, fm.ensure_models
+fm.FaceModel = FakeModel; fm.ensure_models = lambda log=None: None
 se._available_providers = lambda: ["DmlExecutionProvider", "CPUExecutionProvider"]
 app = se.load_model(detail="thorough", use_gpu=True)
-assert app.fs_device == "graphics card" and app.det == (1280, 1280) and app.fs_detail == "thorough"
-assert FakeFA.made[-1] == (("DmlExecutionProvider", "CPUExecutionProvider"), ["detection", "recognition"])
-FakeFA.broken_gpu = True
+assert app.fs_device == "graphics card" and app.det_size == 1280 and app.fs_detail == "thorough"
+assert FakeModel.made[-1] == (1280, ("DmlExecutionProvider", "CPUExecutionProvider"))
+FakeModel.broken_gpu = True
 app = se.load_model(use_gpu=True)
-assert app.fs_device == "processor" and app.det == (640, 640), "must fall back to processor"
+assert app.fs_device == "processor" and app.det_size == 640, "must fall back to processor"
 app = se.load_model(fast=True)
-assert app.fs_device == "processor" and app.det == (320, 320) and FakeFA.made[-1][0] == ("CPUExecutionProvider",)
+assert app.fs_device == "processor" and app.det_size == 320 and FakeModel.made[-1][1] == ("CPUExecutionProvider",)
 se._available_providers = lambda: ["CPUExecutionProvider"]
-FakeFA.broken_gpu = False
+FakeModel.broken_gpu = False
 assert se.load_model(use_gpu=True).fs_device == "processor"
+fm.FaceModel, fm.ensure_models = real_model, real_ensure
 print("11 ok: graphics card used when it works, processor fallback otherwise")
 
-# 12. half-downloaded model folder is repaired, a complete one is kept
-md = os.path.join(se.MODEL_ROOT, se.MODEL_NAME); os.makedirs(md)
-se.repair_model_folder(); assert not os.path.exists(md), "empty model folder removed"
-os.makedirs(md)
-for f in se._MODEL_FILES: open(os.path.join(md, f), "w").write("x")
-se.repair_model_folder(); assert os.path.isdir(md) and se.model_ready()
-print("12 ok: model folder repair")
+# 12. face pipeline pieces (no real model needed)
+#  a) alignment: exact least-squares similarity transform
+rng = np.random.default_rng(1)
+dst = fm._ARCFACE_DST
+for _ in range(200):
+    ang, sc = rng.uniform(-1, 1), rng.uniform(0.2, 8)
+    R = np.array([[np.cos(ang), -np.sin(ang)], [np.sin(ang), np.cos(ang)]])
+    src = (dst - 56) @ R.T * sc + rng.uniform(-500, 3000, 2)
+    m = fm.similarity_transform(src, dst)
+    assert np.abs(src @ m[:, :2].T + m[:, 2] - dst).max() < 1e-6
+#  b) detection: coordinates mapped back to the full-size photo, tiny faces skipped
+class FakeDet:
+    def setInputSize(self, size): self.size = size
+    def detect(self, img):
+        w, h = self.size
+        big = [10, 20, 100, 120] + [30, 50, 80, 50, 55, 80, 35, 100, 75, 100] + [0.95]
+        tiny = [200, 200, 3, 3] + [201] * 10 + [0.9]   # 12 px in the photo: too small
+        return 1, np.array([big, tiny], dtype=np.float32)
+m = object.__new__(fm.FaceModel); m.det_size = 640; m.detector = FakeDet()
+img = np.zeros((2560, 1920, 3), np.uint8)          # scale 0.25
+faces = m.detect(img)
+assert m.detector.size == (480, 640), m.detector.size
+assert len(faces) == 1, "tiny face must be skipped"
+f = faces[0]
+assert np.allclose(f.bbox, [40, 80, 440, 560]) and np.allclose(f.kps[0], [120, 200]) and abs(f.det_score - 0.95) < 1e-6
+#  c) embeddings: unit length, batched, BGR->RGB and normalization applied
+class FakeSession:
+    def __init__(self): self.calls = []
+    def run(self, _names, feeds):
+        blob = next(iter(feeds.values())); self.calls.append(blob.shape)
+        assert blob.dtype == np.float32 and blob.shape[1:] == (3, 112, 112)
+        # vector = per-channel means of the (normalized) input, scaled
+        return [np.stack([[b[0].mean() * 3, b[1].mean() * 4, b[2].mean() * 0 + 1] for b in blob])]
+m.session = FakeSession(); m.input_name = "x"; m.input_size = 112; m.batch = 16; m.mean = 127.5; m.std = 127.5
+faces = [fm.Face(np.zeros(4), dst.copy(), 1.0) for _ in range(20)]
+real_align = fm.align_face
+fm.align_face = lambda im, kps, size=112: np.full((size, size, 3), (0, 0, 255), np.uint8)  # pure red (BGR)
+m.embed(img, faces)
+fm.align_face = real_align
+assert m.session.calls == [(16, 3, 112, 112), (4, 3, 112, 112)], m.session.calls
+e = faces[0].normed_embedding
+assert abs(np.linalg.norm(e) - 1) < 1e-6
+# red after BGR->RGB is channel 0 = (255-127.5)/127.5 = 1, green = -1
+assert np.allclose(e, np.array([3, -4, 1]) / np.linalg.norm([3, -4, 1]), atol=1e-5), e
+#  d) downloads: verified by checksum, a damaged download never left behind
+payload = {"detector": b"Y" * 200_000, "recognizer": b"A" * 300_000}
+import hashlib
+saved = {k: dict(v) for k, v in fm.MODELS.items()}
+for k in fm.MODELS:
+    fm.MODELS[k]["sha256"] = hashlib.sha256(payload[k]).hexdigest()
+def fake_open(url):
+    k = "detector" if url == fm.MODELS["detector"]["url"] else "recognizer"
+    data = payload[k]
+    return iter([data[i:i + 65536] for i in range(0, len(data), 65536)]), len(data)
+fm._open_url = fake_open
+assert not fm.models_ready()
+fm.ensure_models()
+assert fm.models_ready() and fm.download_progress["done"] == fm.download_progress["total"] == 500_000
+os.remove(fm.model_path("recognizer"))
+fm.MODELS["recognizer"]["sha256"] = "0" * 64
+try:
+    fm.ensure_models(); raise SystemExit("expected checksum error")
+except IOError as exc:
+    assert "checksum" in str(exc)
+assert not os.path.exists(fm.model_path("recognizer")) and not os.path.exists(fm.model_path("recognizer") + ".part")
+for k, v in saved.items(): fm.MODELS[k].update(v)
+#  e) caches of different models never mix
+assert ("_" + fm.MODEL_TAG) in os.path.basename(se._cache_path(photos))
+print("12 ok: alignment, detection scaling, embeddings, verified downloads, cache naming")
+
+# 13. "couldn't open" vs "face model failed"; hidden/trash folders skipped
+ph = tmp+"/ph13"; w(ph+"/ok.jpg", "A"); w(ph+"/bad.jpg", "bad"); w(ph+"/boom.jpg", "boom")
+w(ph+"/.dtrash/files/old.jpg", "A"); w(ph+"/$RECYCLE.BIN/x.jpg", "A")
+f13 = se.list_images(ph)
+assert sorted(os.path.basename(x) for x in f13) == ["bad.jpg", "boom.jpg", "ok.jpg"], f13
+o13 = tmp+"/out13"
+r = se.run_search(None, people, f13, o13, ph)
+assert [os.path.basename(x) for x in r["unreadable"]] == ["bad.jpg"]
+assert [os.path.basename(x) for x, _ in r["failed"]] == ["boom.jpg"] and "model exploded" in r["failed"][0][1]
+txt = open(o13+"/unreadable_photos.txt", encoding="utf-8").read()
+assert "bad.jpg" in txt and "face model failed" in txt and "model exploded" in txt
+assert "model exploded" in open(os.path.join(tmp, "face_search_diag.log"), encoding="utf-8").read()
+print("13 ok: open errors and model errors reported separately; trash folders skipped")
+
+# 14. a model that only takes one face at a time: automatic fallback
+class OneAtATime:
+    def __init__(self): self.calls = []
+    def run(self, _n, feeds):
+        blob = next(iter(feeds.values())); self.calls.append(blob.shape[0])
+        if blob.shape[0] != 1: raise RuntimeError("Got invalid dimensions for input: index 0 Got: %d Expected: 1" % blob.shape[0])
+        return [np.ones((1, 4), np.float32)]
+m14 = object.__new__(fm.FaceModel); m14.session = OneAtATime(); m14.input_name = "x"
+m14.input_size = 112; m14.batch = 16; m14.mean = 127.5; m14.std = 127.5
+faces14 = [fm.Face(np.zeros(4), fm._ARCFACE_DST.copy(), 1.0) for _ in range(5)]
+real_align = fm.align_face; fm.align_face = lambda im, kps, size=112: np.zeros((size, size, 3), np.uint8)
+m14.embed(np.zeros((200, 200, 3), np.uint8), faces14)
+fm.align_face = real_align
+assert m14.session.calls == [5, 1, 1, 1, 1, 1] and m14.batch == 1, m14.session.calls
+assert all(abs(np.linalg.norm(f.normed_embedding) - 1) < 1e-6 for f in faces14)
+print("14 ok: falls back to one face at a time when batches are rejected")
 print("ALL ENGINE TESTS PASSED")

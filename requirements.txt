@@ -1,7 +1,8 @@
-insightface==2.0
 onnxruntime==1.30.0
-flet==1.0.3
+onnx==1.23.1
 opencv-python==5.0.0.93
 numpy==2.5.3
+requests==2.34.2
+flet==1.0.3
 plyer==2.1.0
-pillow-heif==1.8.0
+pi-heif==1.4.0

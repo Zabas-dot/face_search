@@ -12,6 +12,7 @@ def fake_read(app, fp):
         return [(vec(0), 100.0, BOX)]
     t = open(fp).read().strip()
     if t == "bad": raise IOError("could not read image")
+    if t == "boom": raise RuntimeError("model exploded")
     out = []
     for tok in t.split():
         tok, _, area = tok.partition("@")

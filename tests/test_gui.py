@@ -13,7 +13,7 @@ import asyncio, types, time, threading, json, numpy as np
 import flet as ft
 import search_engine as se, fake
 se.CACHE_DIR = os.path.join(tmp, "cache"); se.read_faces = fake.fake_read
-se.MODEL_ROOT = os.path.join(tmp, ".insightface", "models")
+se.face_model.MODEL_DIR = os.path.join(tmp, ".face_search", "models")
 import face_search_gui as gui
 gui.CONFIG_PATH = os.path.join(tmp, "cfg.json")
 gui.load_model = lambda **kw: types.SimpleNamespace(fs_device="processor", **kw)
@@ -66,7 +66,7 @@ async def main_test():
     # 1. first launch
     page = FakePage(); gui.main(page); await page.drain()
     print("1 welcome:", page.statuses[-1][:70])
-    assert page.statuses[-1].startswith("Welcome") and "280 MB" in page.statuses[-1]
+    assert page.statuses[-1].startswith("Welcome") and "262 MB" in page.statuses[-1]
     adv = find(page, ft.Column, lambda c: fast_cb in c.controls) if False else None
     cbs = find(page, ft.Checkbox); assert all(not c.visible or True for c in cbs)
     advbox = [c for c in find(page, ft.Column) if any(isinstance(x, ft.Checkbox) for x in c.controls)][0]

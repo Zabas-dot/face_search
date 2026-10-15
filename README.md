@@ -2,7 +2,7 @@
 
 Find every photo of a person in a folder of photos. Give it a few reference photos of their face, and it copies every photo that appears to contain them into an output folder.
 
-Fully offline: runs on your own computer using [InsightFace](https://github.com/deepinsight/insightface) (`buffalo_l` model). No cloud, no accounts, no data leaves your computer. Originals are never modified; matches are copied, never moved.
+Runs entirely on your own computer: no cloud, no accounts, no photos leave your computer. Originals are never modified; matches are copied, never moved. The face models are licensed for commercial use (see [Face models and licenses](#face-models-and-licenses)).
 
 Two ways to use it: a **desktop app** for Windows (no installation), or a **command-line tool** (Python, any OS).
 
@@ -18,7 +18,7 @@ Two ways to use it: a **desktop app** for Windows (no installation), or a **comm
    - **Where to put the matches**: any folder; matches are copied here.
 3. Press **Run search**. The app first shows the faces it will look for, so you can catch a wrong reference photo before the scan starts.
 
-The first search downloads the face-recognition model once (about 280 MB). After that it works fully offline.
+The first search downloads the face models once (about 262 MB). After that it works fully offline.
 
 ### App features
 
@@ -38,8 +38,9 @@ The first search downloads the face-recognition model once (about 280 MB). After
 ### Requirements
 
 - Python 3.10+
-- `pip install insightface onnxruntime opencv-python numpy`
-- For HEIC/iPhone photos, also: `pip install pillow pillow-heif`
+- `face_search.py` and `face_model.py` from this repository
+- `pip install onnxruntime opencv-python numpy onnx requests`
+- For HEIC/iPhone photos, also: `pip install pillow pi-heif`
 
 ### Usage
 
@@ -68,7 +69,7 @@ face_search/
 - `--ref`: folder with reference photos of **one** person (3–5 clear, front-facing shots work best)
 - `--photos`: folder of photos to search (subfolders included)
 - `--out`: folder where matching photos are copied (created automatically)
-- `--threshold`: similarity cutoff, 0–1, default `0.45`
+- `--threshold`: similarity cutoff, 0–1, default `0.40`
 
 To search for another person, run it again with that person's reference folder and a different output folder:
 
@@ -78,8 +79,8 @@ python face_search.py --ref .\refs\person2 --photos "C:\Users\You\Pictures" --ou
 
 ### Tuning the threshold
 
-- Too many wrong matches? Raise it: `--threshold 0.55`
-- Missing photos you know are there? Lower it: `--threshold 0.35`
+- Too many wrong matches? Raise it: `--threshold 0.50`
+- Missing photos you know are there? Lower it: `--threshold 0.30`
 
 ## Running the app from source (Windows)
 
@@ -96,20 +97,45 @@ To build `FaceSearchGUI.exe` yourself, double-click `build_exe.bat`. It sets eve
 
 Run the tests (fake face data, about 30 seconds): `python tests\run_tests.py`
 
+### Tuning the strictness for your photos
+
+`tools\calibrate.py` measures how well the face model tells apart the people in *your* photos and suggests thresholds. Make a folder with one subfolder per person (3+ people, 5+ photos each, ideally photos where they're the only face), then run:
+
+```
+python tools\calibrate.py C:\path\to\calibration_folder
+```
+
+It prints, for each threshold, how often the right person is found and how often someone else is wrongly matched. The report contains only numbers.
+
 | File | What it is |
 |---|---|
+| `face_model.py` | Face detection + recognition (YuNet + AuraFace), model download |
 | `face_search.py` | The command-line tool; also the image reader the app uses |
 | `face_search_gui.py` | The desktop app |
 | `search_engine.py` | The app's search backend: matching, scan cache, output-folder housekeeping |
 | `build_exe.bat` | One-double-click builder for the exe |
 | `tests/` | Automated tests |
+| `tools/calibrate.py` | Measures accuracy on your photos and suggests thresholds |
 
 ## Notes
 
-- The first run downloads the recognition model (about 280 MB) into `~/.insightface`.
+- The first run downloads the face models (about 262 MB) into `~/.face_search/models`, checking each file's SHA-256.
 - Works best on clear, front-facing faces. Profile shots, sunglasses, heavy shadows and very small or distant faces may be missed (the app's Thorough mode helps with small faces).
 - **Command line only:** a reference photo with several faces enrolls every face in it, so use solo shots. The app picks the right face automatically.
 
+## Face models and licenses
+
+| Model | Job | License | Source |
+|---|---|---|---|
+| YuNet (2023mar) | Finds faces | MIT | [OpenCV Zoo](https://huggingface.co/opencv/face_detection_yunet) |
+| AuraFace v1 | Recognizes faces | Apache 2.0 | [fal.ai](https://huggingface.co/fal/AuraFace-v1) |
+
+Both licenses allow commercial use. The models are downloaded from their publishers on first use, not included in this repository or the exe. Only AuraFace's own recognition model is used. The AuraFace download page also hosts InsightFace detector and landmark files, which keep InsightFace's non-commercial license, so this app doesn't use them.
+
+Earlier versions (1.x) used InsightFace's `buffalo_l` models, which are licensed for non-commercial research only. Version 2.0 doesn't use any InsightFace code or models.
+
+As with most face models, the publishers don't fully document their training data. This isn't legal advice; if commercial use matters to you, review the licenses yourself.
+
 ## License
 
-The code is MIT-licensed (see `LICENSE`). The face-recognition model InsightFace downloads (`buffalo_l`) is licensed by InsightFace for **non-commercial research use only**. Personal use is fine; commercial use needs a different model or a license from InsightFace.
+The code is MIT-licensed (see `LICENSE`). Third-party models and libraries keep their own licenses (see `THIRD_PARTY_NOTICES.md`).
